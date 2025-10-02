@@ -1,0 +1,12 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>gitvis - upload</title></head>
+<body>
+  <h1>gitvis — upload a zipped .git or bare repo</h1>
+  <form action="/upload" method="post" enctype="multipart/form-data">
+    <input type="file" name="repo" accept=".zip" required />
+    <button type="submit">Upload</button>
+  </form>
+  <p>Tip: zip the <code>.git</code> directory from any local repo and upload it.</p>
+</body>
+</html>
