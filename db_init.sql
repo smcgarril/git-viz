@@ -1,0 +1,23 @@
+CREATE TABLE IF NOT EXISTS uploads (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT,
+  uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS nodes (
+  id TEXT PRIMARY KEY,
+  upload_id INTEGER,
+  type TEXT,
+  label TEXT,
+  meta TEXT,
+  FOREIGN KEY(upload_id) REFERENCES uploads(id)
+);
+
+CREATE TABLE IF NOT EXISTS edges (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  upload_id INTEGER,
+  source TEXT,
+  target TEXT,
+  rel TEXT,
+  FOREIGN KEY(upload_id) REFERENCES uploads(id)
+);
