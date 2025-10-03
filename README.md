@@ -1,4 +1,4 @@
-# gitvis
+# git-viz
 
 A minimal Go app that accepts an uploaded zipped `.git` directory (or bare repository tar/zip), parses the objects using `go-git`, stores a compact graph in SQLite, and serves a D3 visualization.
 
