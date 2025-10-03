@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"text/template"
 	"time"
 
 	git "github.com/go-git/go-git/v5"
@@ -187,13 +188,13 @@ func parseAndStoreRepo(root string, uploadID int) error {
 			storeNode(c.Hash.String(), uploadID, "commit", strings.TrimSpace(c.Message), meta)
 			// parents
 			for _, p := range c.ParentHashes {
-				storeNodeIfMissing(p.String(), uploadID, "commit")
+				storeNodeIfMissing(p.String(), uploadID, "commit", "")
 				storeEdge(uploadID, c.Hash.String(), p.String(), "parent")
 			}
 			// commit->tree
 			tree, err := c.Tree()
 			if err == nil {
-				storeNodeIfMissing(tree.Hash.String(), uploadID, "tree")
+				storeNodeIfMissing(tree.Hash.String(), uploadID, "tree", "/")
 				storeEdge(uploadID, c.Hash.String(), tree.Hash.String(), "commit->tree")
 				traverseTree(r, tree, uploadID)
 			}
@@ -207,13 +208,14 @@ func parseAndStoreRepo(root string, uploadID int) error {
 func traverseTree(r *git.Repository, t *object.Tree, uploadID int) {
 	for _, e := range t.Entries {
 		if e.Mode.IsFile() {
-			storeNodeIfMissing(e.Hash.String(), uploadID, "blob")
+			// store blob with filename in the label
+			storeNode(e.Hash.String(), uploadID, "blob", e.Name, nil)
 			storeEdge(uploadID, t.Hash.String(), e.Hash.String(), "tree->blob")
 		} else if e.Mode == filemode.Dir {
 			// try to load subtree by path
 			subtree, err := r.TreeObject(e.Hash)
 			if err == nil && subtree != nil {
-				storeNodeIfMissing(subtree.Hash.String(), uploadID, "tree")
+				storeNodeIfMissing(subtree.Hash.String(), uploadID, "tree", e.Name)
 				storeEdge(uploadID, t.Hash.String(), subtree.Hash.String(), "tree->tree")
 				traverseTree(r, subtree, uploadID)
 			}
@@ -231,9 +233,9 @@ func storeNode(id string, uploadID int, typ, label string, meta interface{}) {
 		id, uploadID, typ, label, metaStr)
 }
 
-func storeNodeIfMissing(id string, uploadID int, typ string) {
+func storeNodeIfMissing(id string, uploadID int, typ, label string) {
 	_, _ = db.Exec(`INSERT OR IGNORE INTO nodes(id, upload_id, type, label, meta) VALUES(?,?,?,?,?)`,
-		id, uploadID, typ, "", "")
+		id, uploadID, typ, label, "")
 }
 
 func storeEdge(uploadID int, source, target, rel string) {
@@ -253,12 +255,31 @@ func graphPageHandler(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+
 	if len(parts) == 3 && parts[2] == "json" {
 		graphJSONHandler(w, r, idStr)
 		return
 	}
-	// serve template
-	http.ServeFile(w, r, "templates/graph.html")
+
+	// query the upload name
+	var uploadName string
+	err := db.QueryRow(`SELECT name FROM uploads WHERE id = ?`, idStr).Scan(&uploadName)
+	if err != nil {
+		uploadName = "(unknown)"
+	}
+
+	// render graph.html as a template, injecting RepoID
+	t, err := template.ParseFiles("templates/graph.html")
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+
+	// inject RepoID and Name into the template
+	t.Execute(w, map[string]string{
+		"RepoID": idStr,
+		"Name":   uploadName,
+	})
 }
 
 func graphJSONHandler(w http.ResponseWriter, r *http.Request, idStr string) {
@@ -267,36 +288,81 @@ func graphJSONHandler(w http.ResponseWriter, r *http.Request, idStr string) {
 		http.Error(w, "bad id", 400)
 		return
 	}
+
+	type Node struct {
+		ID    string                 `json:"id"`
+		Type  string                 `json:"type"`
+		Label string                 `json:"label,omitempty"`
+		Extra map[string]interface{} `json:"extra,omitempty"`
+	}
+	type Link struct {
+		Source string `json:"source"`
+		Target string `json:"target"`
+		Rel    string `json:"rel,omitempty"`
+	}
+
+	// fetch nodes
 	rows, err := db.Query("SELECT id,type,label,meta FROM nodes WHERE upload_id=?", uploadID)
 	if err != nil {
 		http.Error(w, err.Error(), 500)
 		return
 	}
 	defer rows.Close()
-	nodes := make([]map[string]interface{}, 0)
+
+	nodes := make([]Node, 0)
 	for rows.Next() {
-		var id, typ, label, meta string
-		rows.Scan(&id, &typ, &label, &meta)
-		var metaObj map[string]interface{}
-		if meta != "" {
-			_ = json.Unmarshal([]byte(meta), &metaObj)
+		var id, typ, label, metaStr string
+		rows.Scan(&id, &typ, &label, &metaStr)
+
+		var meta map[string]interface{}
+		if metaStr != "" {
+			_ = json.Unmarshal([]byte(metaStr), &meta)
 		}
-		nodes = append(nodes, map[string]interface{}{
-			"id": id, "type": typ, "label": label, "meta": metaObj,
+
+		// Enhance node info
+		extra := make(map[string]interface{})
+		if typ == "commit" {
+			extra["message"] = meta["message"]
+			extra["author"] = meta["author"]
+			extra["email"] = meta["email"]
+			extra["date"] = meta["time"]
+			if label == "" {
+				label = id[:7]
+			}
+		} else if typ == "blob" {
+			extra["filename"] = label
+			if label == "" {
+				label = id[:7]
+			}
+		} else if typ == "tree" {
+			if label == "" {
+				label = id[:7]
+			}
+		}
+
+		nodes = append(nodes, Node{
+			ID:    id,
+			Type:  typ,
+			Label: label,
+			Extra: extra,
 		})
 	}
+
+	// fetch edges
 	linkRows, err := db.Query("SELECT source,target,rel FROM edges WHERE upload_id=?", uploadID)
 	if err != nil {
 		http.Error(w, err.Error(), 500)
 		return
 	}
 	defer linkRows.Close()
-	links := make([]map[string]string, 0)
+
+	links := make([]Link, 0)
 	for linkRows.Next() {
 		var s, t, rel string
 		linkRows.Scan(&s, &t, &rel)
-		links = append(links, map[string]string{"source": s, "target": t, "rel": rel})
+		links = append(links, Link{Source: s, Target: t, Rel: rel})
 	}
+
 	out := map[string]interface{}{"nodes": nodes, "links": links}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(out)
